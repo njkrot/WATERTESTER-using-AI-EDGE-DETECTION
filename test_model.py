@@ -1,11 +1,14 @@
 """
+Test a trained YOLO model against images to verify it detects strips.
+Can test against the dataset validation set or your own images.
+
 Usage:
   python test_model.py                          # uses dataset val set
   python test_model.py path/to/image.jpg        # test single image
   python test_model.py path/to/folder/          # test all images in folder
 
-Looks for best.pt in runs/detect/strip_detector/weights/ by default.
-Set WEIGHTS env var for different path.
+Looks for best.pt in runs/detect/ by default.
+Set WEIGHTS env var to use a different path.
 """
 import os
 import sys
@@ -26,8 +29,8 @@ def main():
     weights = os.environ.get("WEIGHTS", "")
     if not weights:
         for candidate in [
+            os.path.join("runs", "detect", "strip_detector_v2", "weights", "best.pt"),
             os.path.join("runs", "detect", "strip_detector", "weights", "best.pt"),
-            os.path.join("runs", "detect", "strip_detector2", "weights", "best.pt"),
         ]:
             if os.path.exists(candidate):
                 weights = candidate
@@ -87,7 +90,7 @@ def main():
     images_with_dets = 0
 
     for img_path in images:
-        results = model.predict(img_path, imgsz=320, conf=0.25, verbose=False)
+        results = model.predict(img_path, imgsz=640, conf=0.25, verbose=False)
 
         for r in results:
             boxes = r.boxes
@@ -127,4 +130,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

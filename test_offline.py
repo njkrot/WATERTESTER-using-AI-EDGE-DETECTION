@@ -1,5 +1,5 @@
 """
-verifies the image pipeline and color analysis
+Offline tests - verifies the image pipeline and color analysis
 without needing Pi hardware. Also demos the LCD display via tkinter.
 
 Run:  python test_offline.py
@@ -247,4 +247,3 @@ if __name__ == "__main__":
     if failed == 0:
         run_display_demo()
     sys.exit(failed)
-

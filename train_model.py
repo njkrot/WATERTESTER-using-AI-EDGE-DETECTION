@@ -114,25 +114,43 @@ def validate_dataset(data_yaml, yaml_mod):
 
 def train(YOLO, data_yaml):
     print("=" * 50)
-    print("TRAINING YOLO11n")
+    print("TRAINING YOLO11s")
     print("=" * 50)
 
-    model = YOLO("yolo11n.pt")
+    import torch
+    device = 0 if torch.cuda.is_available() else "cpu"
+    if device == 0:
+        print(f"Using GPU: {torch.cuda.get_device_name(0)}")
+    else:
+        print("No GPU found, training on CPU (this will be slow)")
+
+    model = YOLO("yolo11s.pt")
     results = model.train(
         data=data_yaml,
-        epochs=50,
-        imgsz=320,
-        batch=16,
+        epochs=150,
+        imgsz=640,
+        batch=32,
+        device=device,
         name="strip_detector",
-        patience=10,
+        patience=25,
+        workers=4,
+        augment=True,
+        mosaic=1.0,
+        mixup=0.15,
+        hsv_h=0.015,
+        hsv_s=0.5,
+        hsv_v=0.3,
     )
     return model, results
 
 
 def find_best_weights():
-    best_pt = os.path.join("runs", "detect", "strip_detector", "weights", "best.pt")
-    if os.path.exists(best_pt):
-        return best_pt
+    for candidate in [
+        os.path.join("runs", "detect", "strip_detector", "weights", "best.pt"),
+        os.path.join("runs", "detect", "strip_detector_v2", "weights", "best.pt"),
+    ]:
+        if os.path.exists(candidate):
+            return candidate
     for root, dirs, files in os.walk("runs"):
         if "best.pt" in files:
             return os.path.join(root, "best.pt")
@@ -148,7 +166,7 @@ def test_model(YOLO, best_pt, data_yaml, yaml_mod):
     model = YOLO(best_pt)
 
     # run official validation
-    metrics = model.val(data=data_yaml, imgsz=320)
+    metrics = model.val(data=data_yaml, imgsz=640)
     print(f"\nValidation results:")
     print(f"  mAP50:     {metrics.box.map50:.3f}")
     print(f"  mAP50-95:  {metrics.box.map:.3f}")
@@ -183,7 +201,7 @@ def test_model(YOLO, best_pt, data_yaml, yaml_mod):
 
     total_detections = 0
     for img_path in sample:
-        results = model.predict(img_path, imgsz=320, conf=0.25, save=False, verbose=False)
+        results = model.predict(img_path, imgsz=640, conf=0.25, save=False, verbose=False)
         for r in results:
             boxes = r.boxes
             n = len(boxes)
@@ -223,7 +241,7 @@ def export_imx(YOLO, best_pt):
     print("=" * 50)
 
     model = YOLO(best_pt)
-    model.export(format="imx", imgsz=320)
+    model.export(format="imx", imgsz=640)
 
     print("\nDone! Check the *_imx_model/ folder for:")
     print("  - packerOut.zip  (copy to Pi)")
