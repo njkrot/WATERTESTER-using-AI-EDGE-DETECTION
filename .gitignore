@@ -2,3 +2,8 @@ __pycache__/
 *.pyc
 .cursor/
 .vscode/
+dataset/
+runs/
+test_predictions/
+*_imx_model/
+*.pt

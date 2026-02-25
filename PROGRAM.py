@@ -27,8 +27,9 @@ logging.basicConfig(
 log = logging.getLogger("strip_reader")
 
 MODEL_PATH = "/home/pi/models/test_strip_yolo.rpk"
-LABELS_PATH = "/home/pi/models/test_strip_labels.txt"
-TARGET_CLASS_NAME = "Testing_strip"
+LABELS_PATH = "/home/pi/models/labels.txt"
+# "object" is the whole-strip class in the Roboflow dataset
+TARGET_CLASS_NAME = "object"
 MIN_CONFIDENCE = 0.35
 
 REACTION_WAIT_SECONDS = 45.0
