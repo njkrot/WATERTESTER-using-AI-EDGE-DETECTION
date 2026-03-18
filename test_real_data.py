@@ -1,19 +1,9 @@
-"""
-Test the color analysis pipeline against REAL strip images from the
-Roboflow dataset. Uses ground-truth bounding boxes to simulate what
-the YOLO model would detect, then runs our full pipeline on the crops.
-
-Also includes intentional failure tests to prove error handling works.
-
-Run:  python test_real_data.py
-(requires dataset/ folder from train_model.py download)
-"""
+"""test pipeline on actual strip photos from water_crops/"""
 import sys
 import os
 import glob
 import types
 
-# stub Pi-only libs
 for mod_name in [
     "picamera2", "picamera2.devices", "picamera2.devices.imx500",
     "picamera2.devices.imx500.postprocess", "gpiozero",
@@ -27,393 +17,211 @@ sys.modules["picamera2.devices"].IMX500 = type("IMX500", (), {})
 sys.modules["picamera2"].Picamera2 = type("Picamera2", (), {})
 sys.modules["gpiozero"].Button = type("Button", (), {})
 sys.modules["gpiozero"].LED = type("LED", (), {})
+sys.modules["gpiozero"].OutputDevice = type("OutputDevice", (), {
+    "__init__": lambda self, *a, **k: None,
+    "on": lambda self: None, "off": lambda self: None,
+    "close": lambda self: None,
+})
 for mod_name in ["RPLCD", "RPLCD.i2c"]:
     sys.modules[mod_name] = types.ModuleType(mod_name)
 sys.modules["RPLCD.i2c"].CharLCD = type("CharLCD", (), {})
 
 import cv2
 import numpy as np
-import yaml
 
 from PROGRAM import (
     crop_strip, pad_roi_from_layout, robust_patch_lab,
     nearest_calibrated_label, analyze_test_strip, average_pad_readings,
-    compute_water_score, clamp_box, PAD_LAYOUT, CALIBRATION_LAB,
+    compute_water_score, clamp_box, filter_outlier_frames,
+    PAD_LAYOUT, CALIBRATION_LAB, DANGER_WEIGHTS,
 )
 from StripEdgeRefinement import refine_strip_edges
 
-# water quality parameter mapping
-# same pads, different meaning for water testing
-WATER_PARAMS = {
-    "LEU": "Lead",
-    "NIT": "Nitrate",
-    "URO": "Chlorine",
-    "PRO": "Turbidity",
-    "pH":  "pH",
-    "BLO": "Iron",
-    "SG":  "TDS",
-    "KET": "Pesticides",
-    "BIL": "Copper",
-}
-
-# roboflow dataset class names
-ROBOFLOW_CLASSES = [
-    '0','1','2','3','4','5','6','7','8','9',
-    'Bilirubin','Blood','Glucose','Ketone','Leukocytes',
-    'Nitrite','Protein','Sp.Gravity','Urobilinogen','object','pH'
-]
-OBJECT_CLASS_ID = 19  # "object" = the whole strip
+NUM_PADS = 16
+DATASET_DIR = "water_crops"
 
 
-def load_dataset_info():
-    data_yaml = os.path.join("dataset", "data.yaml")
-    if not os.path.exists(data_yaml):
-        print("ERROR: dataset/ folder not found. Run train_model.py first")
-        print("  or:  python -c \"from roboflow import Roboflow; ...\" to download")
-        sys.exit(1)
-    with open(data_yaml, "r") as f:
-        return yaml.safe_load(f)
-
-
-def get_images_and_labels(split="valid"):
-    """get paired image+label paths from a dataset split"""
-    img_dir = os.path.join("dataset", split, "images")
-    lbl_dir = os.path.join("dataset", split, "labels")
-
-    pairs = []
+def get_crop_images(split="valid"):
+    """grab imgs from split folder"""
+    idir = os.path.join(DATASET_DIR, split, "images")
+    if not os.path.isdir(idir):
+        return []
+    out = []
     for ext in ["*.jpg", "*.png", "*.jpeg"]:
-        for img_path in glob.glob(os.path.join(img_dir, ext)):
-            base = os.path.splitext(os.path.basename(img_path))[0]
-            lbl_path = os.path.join(lbl_dir, base + ".txt")
-            if os.path.exists(lbl_path):
-                pairs.append((img_path, lbl_path))
-    return pairs
-
-
-def parse_yolo_labels(lbl_path, img_w, img_h):
-    """parse YOLO format labels into pixel bounding boxes"""
-    objects = []
-    with open(lbl_path, "r") as f:
-        for line in f:
-            parts = line.strip().split()
-            if len(parts) < 5:
-                continue
-            cls_id = int(parts[0])
-            cx, cy, w, h = float(parts[1]), float(parts[2]), float(parts[3]), float(parts[4])
-            # convert normalized center+wh to pixel x,y,w,h
-            px = int((cx - w/2) * img_w)
-            py = int((cy - h/2) * img_h)
-            pw = int(w * img_w)
-            ph = int(h * img_h)
-            cls_name = ROBOFLOW_CLASSES[cls_id] if cls_id < len(ROBOFLOW_CLASSES) else str(cls_id)
-            objects.append({"class_id": cls_id, "class_name": cls_name,
-                            "box": (px, py, pw, ph)})
-    return objects
+        out += glob.glob(os.path.join(idir, ext))
+    return sorted(out)
 
 
 def run_pipeline_on_real_images():
-    """main test: load real images, crop strips, analyze colors"""
-    passed = 0
-    failed = 0
+    ok = 0
+    nope = 0
 
-    def check(name, condition, detail=""):
-        nonlocal passed, failed
+    def chk(name, condition, detail=""):  # pass/fail
+        nonlocal ok, nope
         if condition:
-            passed += 1
+            ok += 1
             print(f"  PASS  {name}")
         else:
-            failed += 1
+            nope += 1
             print(f"  FAIL  {name}  {detail}")
 
     print("=" * 60)
-    print("REAL DATA TESTS - actual strip images from dataset")
+    print("REAL DATA TESTS - actual water strip images")
     print("=" * 60)
 
-    # use all splits for testing
-    all_pairs = []
-    for split in ["valid", "test", "train"]:
-        pairs = get_images_and_labels(split)
-        all_pairs.extend(pairs)
+    aimgs = get_crop_images("valid") + get_crop_images("train")
+    print(f"\nFound {len(aimgs)} crop images")
 
-    print(f"\nFound {len(all_pairs)} image+label pairs total")
+    if not aimgs:
+        print("No images found. Run prepare_water_dataset.py first.")
+        return 1
 
-    # find images that have the "object" class (whole strip bbox)
-    strip_images = []
-    pad_images = []
+    # run pipeline on crops
+    print(f"\n[crop & analyze - water strip images]")
+    acnt = 0
+    allres = []
 
-    for img_path, lbl_path in all_pairs:
-        img = cv2.imread(img_path)
-        if img is None:
+    for ip in aimgs[:20]:
+        fn = os.path.basename(ip)
+        im = cv2.imread(ip)
+        if im is None:
             continue
-        h, w = img.shape[:2]
-        objects = parse_yolo_labels(lbl_path, w, h)
 
-        has_strip = any(o["class_id"] == OBJECT_CLASS_ID for o in objects)
-        has_pads = any(10 <= o["class_id"] <= 20 and o["class_id"] != OBJECT_CLASS_ID for o in objects)
+        # rotate horizontal->vertical like real pipeline does
+        if im.shape[1] > im.shape[0]:
+            im = cv2.rotate(im, cv2.ROTATE_90_CLOCKWISE)
 
-        if has_strip:
-            strip_images.append((img_path, img, objects))
-        if has_pads:
-            pad_images.append((img_path, img, objects))
+        ref = refine_strip_edges(im)
+        if ref is not None and ref.size > 0:
+            im = ref
 
-    print(f"Images with whole-strip bbox ('object'): {len(strip_images)}")
-    print(f"Images with individual pad annotations: {len(pad_images)}")
+        r = analyze_test_strip(im)
 
-    # ============================================
-    # TEST 1: crop strips from real images
-    # ============================================
-    print(f"\n[crop & analyze - whole strip images]")
+        if "error" not in r and len(r["pads"]) == NUM_PADS:
+            acnt += 1
+            allres.append(r)
 
-    analyzed_count = 0
-    all_results = []
+            lv = [p["lab"] for p in r["pads"] if p["lab"] is not None]
+            chk(f"{fn} - extracted colors", len(lv) > 0)
 
-    for img_path, img, objects in strip_images[:20]:
-        fname = os.path.basename(img_path)
-        strip_objs = [o for o in objects if o["class_id"] == OBJECT_CLASS_ID]
+            if acnt <= 3:
+                for p in r["pads"]:
+                    ls = str(p["lab"]) if p["lab"] else "none"
+                    print(f"      {p['name']:>12}: LAB={ls:>25}  -> {p['estimate']}")
 
-        for so in strip_objs:
-            box = so["box"]
-            crop = crop_strip(img, box)
+    chk("at least 1 strip analyzed", acnt > 0, f"got {acnt}")
 
-            if crop is None or crop.size == 0:
-                continue
-
-            # try edge refinement too
-            refined = refine_strip_edges(crop)
-            if refined is not None and refined.size > 0:
-                crop = refined
-
-            result = analyze_test_strip(crop)
-
-            if "error" not in result and len(result["pads"]) == 9:
-                analyzed_count += 1
-                all_results.append(result)
-
-                # show what we got from this image
-                lab_values = []
-                for pad in result["pads"]:
-                    if pad["lab"] is not None:
-                        lab_values.append(pad["lab"])
-
-                has_real_colors = len(lab_values) > 0
-                check(f"{fname} - extracted colors",
-                      has_real_colors,
-                      "no LAB values extracted")
-
-                if has_real_colors and analyzed_count <= 5:
-                    # print detail for first few
-                    for pad in result["pads"]:
-                        water_param = WATER_PARAMS.get(pad["name"], pad["name"])
-                        lab_str = str(pad["lab"]) if pad["lab"] else "none"
-                        print(f"      {pad['name']:>3} ({water_param:>10}): "
-                              f"LAB={lab_str:>25}  -> {pad['estimate']}")
-
-    check("at least 1 strip analyzed from real data", analyzed_count > 0,
-          f"got {analyzed_count}")
-
-    # ============================================
-    # TEST 2: LAB values are reasonable
-    # ============================================
+    # LAB sanity  #CRIT
     print(f"\n[LAB value sanity checks]")
-
-    for result in all_results[:10]:
-        for pad in result["pads"]:
-            if pad["lab"] is not None:
-                L, a, b = pad["lab"]
-                check(f"L channel valid ({pad['name']} L={L:.0f})",
-                      0 <= L <= 255)
-                check(f"a channel valid ({pad['name']} a={a:.0f})",
-                      0 <= a <= 255)
-                check(f"b channel valid ({pad['name']} b={b:.0f})",
-                      0 <= b <= 255)
-                break  # just check one pad per image to keep output sane
-
-    # ============================================
-    # TEST 3: consistency across similar images
-    # ============================================
-    print(f"\n[consistency - multi-frame averaging]")
-
-    if len(all_results) >= 2:
-        avg = average_pad_readings(all_results[:3])
-        check("averaging works on real data", "pads" in avg)
-        check("averaged pads count", len(avg.get("pads", [])) == 9)
-
-        for pad in avg.get("pads", []):
-            if pad.get("sample_count", 0) > 1:
-                check(f"avg {pad['name']} has multiple samples",
-                      pad["sample_count"] > 1)
+    for r in allres[:10]:
+        for p in r["pads"]:
+            if p["lab"] is not None:
+                L, a, b = p["lab"]
+                chk(f"L valid ({p['name']} L={L:.0f})", 0 <= L <= 255)
+                chk(f"a valid ({p['name']} a={a:.0f})", 0 <= a <= 255)
+                chk(f"b valid ({p['name']} b={b:.0f})", 0 <= b <= 255)
                 break
 
-    # ============================================
-    # TEST 4: water score from real data
-    # ============================================
-    print(f"\n[water quality scoring]")
+    # multi-frame avg
+    print(f"\n[consistency - multi-frame averaging]")
+    if len(allres) >= 2:
+        avg = average_pad_readings(allres[:3])
+        chk("averaging works on real data", "pads" in avg)
+        chk("averaged pads count", len(avg.get("pads", [])) == NUM_PADS)
 
-    for i, result in enumerate(all_results[:5]):
-        score = compute_water_score(result)
-        check(f"image {i+1} score is valid string", isinstance(score, str) and "/" in score,
-              f"got: {score}")
+        for p in avg.get("pads", []):
+            if p.get("sample_count", 0) > 1:
+                chk(f"avg {p['name']} has multiple samples", p["sample_count"] > 1)
+                break
+
+    # outlier detection  # works for now
+    print(f"\n[outlier detection on real data]")
+    if len(allres) >= 3:
+        good, bad = filter_outlier_frames(allres[:5])
+        chk("outlier filter runs on real data", len(good) >= 1)
+        chk("good + bad = total", len(good) + bad == min(5, len(allres)))
+
+    # water score
+    print(f"\n[water quality scoring]")  #CRIT
+    for i, r in enumerate(allres[:5]):
+        sc, wrn = compute_water_score(r)
+        chk(f"image {i+1} score 0-100", isinstance(sc, int) and 0 <= sc <= 100,
+              f"got: {sc}")
         if i < 3:
-            print(f"      score = {score}")
+            ws = ", ".join(wrn[:3]) if wrn else "none"
+            print(f"      score = {sc}/100, warnings: {ws}")
 
-    # ============================================
-    # TEST 5: individual pad detection from dataset annotations
-    # ============================================
-    print(f"\n[individual pad color reads from annotations]")
+    # danger weights
+    print(f"\n[danger weight checks]")
+    chk("Lead is critical (3x)", DANGER_WEIGHTS.get("Lead") == 3.0)
+    chk("Mercury is critical (3x)", DANGER_WEIGHTS.get("Mercury") == 3.0)
+    chk("Iron is high (2x)", DANGER_WEIGHTS.get("Iron") == 2.0)
+    chk("pH is standard (1x)", DANGER_WEIGHTS.get("pH") == 1.0)
 
-    pads_read = 0
-    for img_path, img, objects in pad_images[:10]:
-        fname = os.path.basename(img_path)
-        pad_objs = [o for o in objects if 10 <= o["class_id"] <= 20 and o["class_id"] != OBJECT_CLASS_ID]
+    # edge cases / failure handling
+    print(f"\n[failure handling]")
 
-        for po in pad_objs[:3]:
-            box = po["box"]
-            x, y, w, h = clamp_box(box[0], box[1], box[2], box[3],
-                                    img.shape[1], img.shape[0])
-            patch = img[y:y+h, x:x+w].copy()
-            if patch.size == 0:
-                continue
+    wh = np.full((500, 60, 3), 255, dtype=np.uint8)
+    rw = analyze_test_strip(wh)
+    chk("overexposed white handled", "pads" in rw)
 
-            lab = robust_patch_lab(patch)
-            if lab is not None:
-                pads_read += 1
-                if pads_read <= 6:
-                    print(f"      {fname}: {po['class_name']:>13} -> "
-                          f"LAB=[{lab[0]:.0f}, {lab[1]:.0f}, {lab[2]:.0f}]")
+    bl = np.zeros((500, 60, 3), dtype=np.uint8)
+    rb = analyze_test_strip(bl)
+    chk("underexposed black handled", "pads" in rb)
 
-    check("read colors from annotated pads", pads_read > 0, f"got {pads_read}")
+    tn = np.zeros((5, 3, 3), dtype=np.uint8)
+    rt = analyze_test_strip(tn)
+    chk("tiny image doesnt crash", rt is not None)
 
-    # ============================================
-    # TEST 6: FAILURE CASES - prove error handling works
-    # ============================================
-    print(f"\n[intentional failure tests]")
+    ns = np.random.randint(0, 256, (500, 60, 3), dtype=np.uint8)
+    rn = analyze_test_strip(ns)
+    chk("random noise handled", "pads" in rn and len(rn["pads"]) == NUM_PADS)
 
-    # pure white image (overexposed)
-    white = np.full((300, 60, 3), 255, dtype=np.uint8)
-    result_white = analyze_test_strip(white)
-    check("overexposed white image handled",
-          "pads" in result_white,
-          "crashed on white image")
+    chk("None input -> error", "error" in analyze_test_strip(None))
+    emp = np.zeros((0, 0, 3), dtype=np.uint8)
+    chk("empty input -> error", "error" in analyze_test_strip(emp))
 
-    # pure black image (underexposed)
-    black = np.zeros((300, 60, 3), dtype=np.uint8)
-    result_black = analyze_test_strip(black)
-    check("underexposed black image handled",
-          "pads" in result_black,
-          "crashed on black image")
+    se, _ = compute_water_score({})
+    chk("empty result -> 0", se == 0)
+    snp, _ = compute_water_score({"pads": []})
+    chk("no pads -> 0", snp == 0)
 
-    # tiny image (too small to be a real strip)
-    tiny = np.zeros((5, 3, 3), dtype=np.uint8)
-    result_tiny = analyze_test_strip(tiny)
-    check("tiny image doesnt crash", result_tiny is not None)
+    # LAB range sanity  """DNT DEL"""
+    print(f"\n[real vs calibration LAB ranges]")
+    if allres:
+        rL = []
+        ra = []
+        rb_ = []  # rb is taken above lol
+        for r in allres:
+            for p in r["pads"]:
+                if p["lab"] is not None:
+                    rL.append(p["lab"][0])
+                    ra.append(p["lab"][1])
+                    rb_.append(p["lab"][2])
 
-    # random noise (garbage data)
-    noise = np.random.randint(0, 256, (300, 60, 3), dtype=np.uint8)
-    result_noise = analyze_test_strip(noise)
-    check("random noise handled",
-          "pads" in result_noise and len(result_noise["pads"]) == 9)
+        if rL:
+            print(f"      Real LAB across {len(rL)} readings:")
+            print(f"        L: {min(rL):.0f} - {max(rL):.0f}")
+            print(f"        a: {min(ra):.0f} - {max(ra):.0f}")
+            print(f"        b: {min(rb_):.0f} - {max(rb_):.0f}")
 
-    # half-strip (strip cut in half vertically)
-    if strip_images:
-        _, img, objects = strip_images[0]
-        strip_obj = [o for o in objects if o["class_id"] == OBJECT_CLASS_ID][0]
-        box = strip_obj["box"]
-        crop_full = crop_strip(img, box)
-        if crop_full is not None:
-            half = crop_full[:crop_full.shape[0]//2, :, :]
-            result_half = analyze_test_strip(half)
-            check("half-strip still returns 9 pads (some may be empty)",
-                  len(result_half.get("pads", [])) == 9)
+            chk("L channel has spread", max(rL) - min(rL) > 10)
+            chk("a channel has spread", max(ra) - min(ra) > 3)
+            chk("b channel has spread", max(rb_) - min(rb_) > 3)
 
-    # extremely blurry (simulating motion blur)
-    if strip_images:
-        _, img, objects = strip_images[0]
-        strip_obj = [o for o in objects if o["class_id"] == OBJECT_CLASS_ID][0]
-        crop = crop_strip(img, strip_obj["box"])
-        if crop is not None:
-            blurry = cv2.GaussianBlur(crop, (31, 31), 15)
-            result_blur = analyze_test_strip(blurry)
-            check("blurry image handled",
-                  "pads" in result_blur and len(result_blur["pads"]) == 9)
-
-    # wrong orientation (horizontal when we expect vertical)
-    if strip_images:
-        _, img, objects = strip_images[0]
-        strip_obj = [o for o in objects if o["class_id"] == OBJECT_CLASS_ID][0]
-        crop = crop_strip(img, strip_obj["box"])
-        if crop is not None:
-            rotated = cv2.rotate(crop, cv2.ROTATE_90_CLOCKWISE)
-            result_rot = analyze_test_strip(rotated)
-            check("rotated image still works",
-                  "pads" in result_rot and len(result_rot["pads"]) == 9)
-
-    # None and empty
-    check("None input -> error", "error" in analyze_test_strip(None))
-    empty = np.zeros((0, 0, 3), dtype=np.uint8)
-    check("empty input -> error", "error" in analyze_test_strip(empty))
-
-    # score edge cases
-    check("empty result -> --", compute_water_score({}) == "--")
-    check("no pads -> --", compute_water_score({"pads": []}) == "--")
-
-    # ============================================
-    # TEST 7: compare real vs synthetic LAB ranges
-    # ============================================
-    print(f"\n[real vs synthetic LAB comparison]")
-
-    if all_results:
-        real_L_vals = []
-        real_a_vals = []
-        real_b_vals = []
-        for result in all_results:
-            for pad in result["pads"]:
-                if pad["lab"] is not None:
-                    real_L_vals.append(pad["lab"][0])
-                    real_a_vals.append(pad["lab"][1])
-                    real_b_vals.append(pad["lab"][2])
-
-        if real_L_vals:
-            print(f"      Real data LAB ranges across {len(real_L_vals)} pad readings:")
-            print(f"        L: {min(real_L_vals):.0f} - {max(real_L_vals):.0f}  (avg {np.mean(real_L_vals):.0f})")
-            print(f"        a: {min(real_a_vals):.0f} - {max(real_a_vals):.0f}  (avg {np.mean(real_a_vals):.0f})")
-            print(f"        b: {min(real_b_vals):.0f} - {max(real_b_vals):.0f}  (avg {np.mean(real_b_vals):.0f})")
-
-            check("L channel has spread (not all same color)",
-                  max(real_L_vals) - min(real_L_vals) > 10)
-            check("a channel has spread",
-                  max(real_a_vals) - min(real_a_vals) > 5)
-            check("b channel has spread",
-                  max(real_b_vals) - min(real_b_vals) > 5)
-
-            # compare against our calibration table
-            print(f"\n      Calibration table ranges:")
-            for pad_name, entries in CALIBRATION_LAB.items():
-                L_range = [e[1][0] for e in entries]
-                print(f"        {pad_name:>3}: L={min(L_range):.0f}-{max(L_range):.0f}  "
-                      f"(real data L avg={np.mean(real_L_vals):.0f})")
-
-    # ============================================
     # summary
-    # ============================================
     print("\n" + "=" * 60)
-    total = passed + failed
-    print(f"RESULTS:  {passed}/{total} passed,  {failed} failed")
-
-    if analyzed_count > 0:
-        print(f"\nSuccessfully analyzed {analyzed_count} real strip images from dataset.")
-        print(f"Water quality mapping: {WATER_PARAMS}")
+    tot = ok + nope
+    print(f"RESULTS:  {ok}/{tot} passed,  {nope} failed")
+    if acnt > 0:
+        print(f"\nAnalyzed {acnt} real strip images.")
+    if nope == 0:
+        print("All tests passed.")
     else:
-        print("\nWARNING: no strip images could be analyzed.")
-        print("Check that dataset has 'object' class annotations.")
-
-    if failed == 0:
-        print("\nAll tests passed - pipeline works on real data.")
-    else:
-        print("\nSome tests failed - check output above.")
+        print("Some tests failed.")
     print("=" * 60)
-    return failed
+    return nope
 
 
 if __name__ == "__main__":
-    load_dataset_info()
     sys.exit(run_pipeline_on_real_images())

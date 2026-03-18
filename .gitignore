@@ -7,3 +7,13 @@ runs/
 test_predictions/
 *_imx_model/
 *.pt
+water_dataset_raw/
+water_strips/
+water_reference/
+water_other/
+water_dataset/
+water_crops/
+annotation_check.jpg
+grid_calibration.jpg
+calibration_data.json
+_test_*.py

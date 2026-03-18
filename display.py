@@ -50,7 +50,7 @@ class _LCDBackend:
 
 
 class _GUIBackend:
-    """tkinter LCD sim window"""
+    """lcd sim"""
 
     def __init__(self):
         self._line1 = " " * LCD_COLS
@@ -73,25 +73,25 @@ class _GUIBackend:
         self._root.resizable(False, False)
         self._root.protocol("WM_DELETE_WINDOW", self._on_close)
 
-        lcd_font = tkfont.Font(family="Courier", size=26, weight="bold")
+        fnt = tkfont.Font(family="Courier", size=26, weight="bold")
 
         outer = tk.Frame(self._root, bg="#1a1a1a", padx=16, pady=12)
         outer.pack()
 
-        header = tk.Label(outer, text="LCD 16x2", font=("Arial", 9),
-                          fg="#666666", bg="#1a1a1a")
-        header.pack(anchor="w")
+        hdr = tk.Label(outer, text="LCD 16x2", font=("Arial", 9),
+                       fg="#666666", bg="#1a1a1a")
+        hdr.pack(anchor="w")
 
-        lcd_frame = tk.Frame(outer, bg="#0a3d0a", padx=14, pady=10,
-                             highlightbackground="#333", highlightthickness=2)
-        lcd_frame.pack(pady=(4, 0))
+        lcd_fr = tk.Frame(outer, bg="#0a3d0a", padx=14, pady=10,
+                          highlightbackground="#333", highlightthickness=2)
+        lcd_fr.pack(pady=(4, 0))
 
-        self._lbl1 = tk.Label(lcd_frame, text=self._line1, font=lcd_font,
+        self._lbl1 = tk.Label(lcd_fr, text=self._line1, font=fnt,
                               fg="#33ff33", bg="#0a3d0a", anchor="w",
                               width=LCD_COLS, padx=6, pady=2)
-        self._lbl1.pack(pady=(0, 1))
+        self._lbl1.pack(pady=(0,1))
 
-        self._lbl2 = tk.Label(lcd_frame, text=self._line2, font=lcd_font,
+        self._lbl2 = tk.Label(lcd_fr, text=self._line2, font=fnt,
                               fg="#33ff33", bg="#0a3d0a", anchor="w",
                               width=LCD_COLS, padx=6, pady=2)
         self._lbl2.pack()
@@ -115,7 +115,7 @@ class _GUIBackend:
                 except Exception:
                     pass
                 self._dirty = False
-        self._root.after(50, self._poll)
+        self._root.after(50, self._poll)  # 50ms refresh, seems fine
 
     def _on_close(self):
         self._closed = True
@@ -134,6 +134,7 @@ class _GUIBackend:
 
 
 class _ConsoleBackend:
+    # fallback when no hw or gui
     def write(self, l1, l2):
         print("[LCD] {} | {}".format(l1.strip(), l2.strip()))
     def clear(self):
@@ -143,7 +144,7 @@ class _ConsoleBackend:
 
 
 class Display:
-    """LCD wrapper - picks real hardware, tkinter sim, or console."""
+    """picks which display to use"""
 
     def __init__(self, username="User"):
         self._username = username
@@ -166,7 +167,7 @@ class Display:
 
         if self._backend is None:
             self._backend = _ConsoleBackend()
-            log.info("LCD output goes to console.")
+            log.info("LCD output goes to console.")  #NEED?! maybe remove later
 
     def _pad(self, text):
         return str(text)[:LCD_COLS].ljust(LCD_COLS)
@@ -186,20 +187,20 @@ class Display:
             pass
 
     def show_hello(self):
-        name = self._username[:LCD_COLS - 7]
-        score = str(self._last_score) if self._last_score is not None else "--"
-        self.write("Hello, {}".format(name), "Last test: {}".format(score))
+        nm = self._username[:LCD_COLS - 7]
+        sc = str(self._last_score) if self._last_score is not None else "--"
+        self.write("Hello, {}".format(nm), "Last test: {}".format(sc))
 
     def show_filtering(self, remaining_secs):
         if remaining_secs >= 60:
-            time_str = "{}m left".format(int(remaining_secs / 60))
+            ts = "{}m left".format(int(remaining_secs / 60))
         else:
-            time_str = "{}s left".format(int(remaining_secs))
-        self.write("Filtering water.", time_str)
+            ts = "{}s left".format(int(remaining_secs))
+        self.write("Filtering water.", ts)
 
     def show_score(self):
-        score = str(self._last_score) if self._last_score is not None else "--"
-        self.write("Water score is", score)
+        sc = str(self._last_score) if self._last_score is not None else "--"
+        self.write("Water score is", sc)
 
     def set_last_score(self, score):
         self._last_score = score
@@ -208,10 +209,10 @@ class Display:
         self.write("Reading strip...", "hold steady")
 
     def show_results(self, pads, score=None):
-        count = len(pads) if pads else 0
+        cnt = len(pads) if pads else 0
         if score is not None:
             self.set_last_score(score)
-        self.write("Done! {} pads".format(count), "Score: {}".format(
+        self.write("Done! {} pads".format(cnt), "Score: {}".format(
             score if score else self._last_score or "--"))
 
     def show_error(self, msg):

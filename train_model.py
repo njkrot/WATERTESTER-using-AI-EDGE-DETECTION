@@ -1,15 +1,4 @@
-"""
-Train a YOLO model on the Roboflow urine test strip dataset
-and export it for the IMX500 camera.
-
-Steps:
-  1. pip install roboflow ultralytics
-  2. Get a free API key from https://app.roboflow.com/settings/api
-  3. Run: python train_model.py
-
-The exported model goes into *_imx_model/ which contains
-the packerOut.zip and labels.txt you need for the Pi.
-"""
+"""train YOLO on strip dataset -> export for IMX500"""
 import os
 import sys
 import glob
@@ -48,7 +37,7 @@ def download_dataset(Roboflow):
 
 
 def validate_dataset(data_yaml, yaml_mod):
-    """check dataset looks right before training"""
+    """quick check"""
     print("\n" + "=" * 50)
     print("VALIDATING DATASET")
     print("=" * 50)
@@ -56,11 +45,11 @@ def validate_dataset(data_yaml, yaml_mod):
     with open(data_yaml, "r") as f:
         cfg = yaml_mod.safe_load(f)
 
-    class_names = cfg.get("names", {})
-    num_classes = cfg.get("nc", 0)
-    print(f"Classes ({num_classes}): {class_names}")
+    cnames = cfg.get("names", {})
+    nc = cfg.get("nc", 0)
+    print(f"Classes ({nc}): {cnames}")
 
-    # check the splits exist and have images
+    # splits gotta have images or whats the point
     for split in ["train", "valid", "test"]:
         split_path = cfg.get(split, "")
         if not split_path:
@@ -74,33 +63,32 @@ def validate_dataset(data_yaml, yaml_mod):
         imgs += glob.glob(os.path.join(split_path, "*.png"))
         imgs += glob.glob(os.path.join(split_path, "*.jpeg"))
 
-        # check for labels too
-        label_dir = split_path.replace("images", "labels")
-        labels = glob.glob(os.path.join(label_dir, "*.txt"))
+        lbl_dir = split_path.replace("images", "labels")
+        labels = glob.glob(os.path.join(lbl_dir, "*.txt"))
 
         print(f"  {split}: {len(imgs)} images, {len(labels)} label files")
 
         if len(imgs) == 0:
             print(f"  WARNING: no images found in {split_path}")
 
-        # peek at a couple label files to see what classes are actually annotated
+        # peek at labels to see whats annotated
         if labels and split == "train":
-            class_counts = {}
+            cc = {}
             for lf in labels:
                 with open(lf, "r") as f:
-                    for line in f:
-                        parts = line.strip().split()
-                        if parts:
-                            cid = int(parts[0])
-                            cname = class_names.get(cid, str(cid))
-                            class_counts[cname] = class_counts.get(cname, 0) + 1
+                    for ln in f:
+                        pts = ln.strip().split()
+                        if pts:
+                            cid = int(pts[0])
+                            cn = cnames.get(cid, str(cid))
+                            cc[cn] = cc.get(cn, 0) + 1
 
             print(f"\n  Annotations in train set:")
-            for name, count in sorted(class_counts.items(), key=lambda x: -x[1]):
-                print(f"    {name}: {count} boxes")
+            for nm, cnt in sorted(cc.items(), key=lambda x: -x[1]):
+                print(f"    {nm}: {cnt} boxes")
 
-    # check if "object" class exists (thats the whole strip)
-    has_object = any(v == "object" for v in class_names.values())
+    # "object" = whole strip class
+    has_object = any(v == "object" for v in cnames.values())
     if has_object:
         print("\n  'object' class found - this is the whole strip detection class.")
     else:
@@ -118,19 +106,20 @@ def train(YOLO, data_yaml):
     print("=" * 50)
 
     import torch
-    device = 0 if torch.cuda.is_available() else "cpu"
-    if device == 0:
+    dev = 0 if torch.cuda.is_available() else "cpu"
+    if dev == 0:
         print(f"Using GPU: {torch.cuda.get_device_name(0)}")
     else:
         print("No GPU found, training on CPU (this will be slow)")
 
-    model = YOLO("yolo11s.pt")
-    results = model.train(
+    mdl = YOLO("yolo11s.pt")
+    #CRIT - actual training call, dont mess with these params
+    results = mdl.train(
         data=data_yaml,
         epochs=150,
         imgsz=640,
         batch=32,
-        device=device,
+        device=dev,
         name="strip_detector",
         patience=25,
         workers=4,
@@ -141,11 +130,12 @@ def train(YOLO, data_yaml):
         hsv_s=0.5,
         hsv_v=0.3,
     )
-    return model, results
+    return mdl, results
 
 
 def find_best_weights():
     for candidate in [
+        os.path.join("runs", "detect", "water_strip_v2", "weights", "best.pt"),
         os.path.join("runs", "detect", "strip_detector", "weights", "best.pt"),
         os.path.join("runs", "detect", "strip_detector_v2", "weights", "best.pt"),
     ]:
@@ -158,15 +148,15 @@ def find_best_weights():
 
 
 def test_model(YOLO, best_pt, data_yaml, yaml_mod):
-    """run the trained model on validation images and show what it detects"""
+    """run model on val imgs"""
     print("\n" + "=" * 50)
     print("TESTING MODEL ON VALIDATION SET")
     print("=" * 50)
 
-    model = YOLO(best_pt)
+    mdl = YOLO(best_pt)
 
-    # run official validation
-    metrics = model.val(data=data_yaml, imgsz=640)
+    # official val pass
+    metrics = mdl.val(data=data_yaml, imgsz=640)
     print(f"\nValidation results:")
     print(f"  mAP50:     {metrics.box.map50:.3f}")
     print(f"  mAP50-95:  {metrics.box.map:.3f}")
@@ -177,7 +167,7 @@ def test_model(YOLO, best_pt, data_yaml, yaml_mod):
         print("\n  WARNING: mAP50 is very low - model may not be detecting much.")
         print("  The dataset might be too small or need more epochs.")
 
-    # run inference on some validation images and save annotated results
+    # inference on val imgs, save annotated  # works for now
     with open(data_yaml, "r") as f:
         cfg = yaml_mod.safe_load(f)
 
@@ -190,49 +180,47 @@ def test_model(YOLO, best_pt, data_yaml, yaml_mod):
 
     if not val_imgs:
         print("No validation images found to run inference on.")
-        return model
+        return mdl
 
-    # predict on up to 10 images and save the annotated outputs
+    # predict on up to 10 imgs
     sample = val_imgs[:10]
     print(f"\nRunning inference on {len(sample)} sample images...")
 
     out_dir = "test_predictions"
     os.makedirs(out_dir, exist_ok=True)
 
-    total_detections = 0
-    for img_path in sample:
-        results = model.predict(img_path, imgsz=640, conf=0.25, save=False, verbose=False)
-        for r in results:
-            boxes = r.boxes
-            n = len(boxes)
-            total_detections += n
+    td = 0
+    for ip in sample:
+        res = mdl.predict(ip, imgsz=640, conf=0.25, save=False, verbose=False)
+        for r in res:
+            bxs = r.boxes
+            n = len(bxs)
+            td += n
 
-            # save annotated image
-            annotated = r.plot()
-            fname = os.path.basename(img_path)
-            save_path = os.path.join(out_dir, fname)
+            ann = r.plot()
+            fn = os.path.basename(ip)
+            sp = os.path.join(out_dir, fn)
             import cv2
-            cv2.imwrite(save_path, annotated)
+            cv2.imwrite(sp, ann)
 
-            # print what was found
             if n > 0:
-                class_names = r.names
-                for b in boxes:
-                    cls_id = int(b.cls[0])
-                    conf = float(b.conf[0])
-                    name = class_names.get(cls_id, str(cls_id))
-                    print(f"  {fname}: detected '{name}' ({conf:.2f})")
+                cn = r.names
+                for b in bxs:
+                    cid = int(b.cls[0])
+                    cf = float(b.conf[0])
+                    nm = cn.get(cid, str(cid))
+                    print(f"  {fn}: detected '{nm}' ({cf:.2f})")
             else:
-                print(f"  {fname}: nothing detected")
+                print(f"  {fn}: nothing detected")
 
-    print(f"\nTotal: {total_detections} detections across {len(sample)} images")
+    print(f"\nTotal: {td} detections across {len(sample)} images")
     print(f"Annotated images saved to {out_dir}/")
 
-    if total_detections == 0:
+    if td == 0:
         print("\nWARNING: model didnt detect anything on the validation set.")
         print("May need more training data or more epochs.")
 
-    return model
+    return mdl
 
 
 def export_imx(YOLO, best_pt):
@@ -240,8 +228,8 @@ def export_imx(YOLO, best_pt):
     print("EXPORTING TO IMX500")
     print("=" * 50)
 
-    model = YOLO(best_pt)
-    model.export(format="imx", imgsz=640)
+    m = YOLO(best_pt)
+    m.export(format="imx", imgsz=640)  # dumps to *_imx_model/
 
     print("\nDone! Check the *_imx_model/ folder for:")
     print("  - packerOut.zip  (copy to Pi)")
@@ -254,27 +242,29 @@ def export_imx(YOLO, best_pt):
 def main():
     Roboflow, YOLO, yaml_mod = check_deps()
 
-    # step 1: download
-    data_yaml = download_dataset(Roboflow)
+    # local dataset first if it exists
+    wy = os.path.join("water_crops", "data.yaml")
+    if os.path.exists(wy):
+        print("Found local water strip dataset at water_crops/")
+        print("To use the Roboflow dataset instead, rename/remove water_crops/")
+        data_yaml = wy
+    else:
+        data_yaml = download_dataset(Roboflow)
 
-    # step 2: validate dataset
     validate_dataset(data_yaml, yaml_mod)
 
-    # step 3: train
-    model, results = train(YOLO, data_yaml)
+    #CRIT - training
+    mdl, results = train(YOLO, data_yaml)
 
-    # step 4: find weights
-    best_pt = find_best_weights()
-    if not best_pt:
+    bp = find_best_weights()
+    if not bp:
         print("Couldnt find best.pt - check runs/ folder")
         sys.exit(1)
-    print(f"\nBest weights: {best_pt}")
+    print(f"\nBest weights: {bp}")
 
-    # step 5: test on validation images
-    test_model(YOLO, best_pt, data_yaml, yaml_mod)
+    test_model(YOLO, bp, data_yaml, yaml_mod)
 
-    # step 6: export
-    export_imx(YOLO, best_pt)
+    export_imx(YOLO, bp)
 
     print("\n" + "=" * 50)
     print("ALL DONE")
