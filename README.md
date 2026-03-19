@@ -49,7 +49,7 @@ if the waters bad it still filters it just warns you whats wrong
 - `touchscreen.py` - main gui, does the whole test/filter/dispense thing
 - `pump_control.py` - pump and solenoid control
 - `PROGRAM.py` - YOLO + color analysis pipeline
-- `GRID_READER.py` - simpler reader, no AI, just fixed crop
+- `GRID_READER.py` - simpler reader, no AI, just fixed crop, find in runs branch
 - `StripEdgeRefinement.py` - edge cleanup
 - `display.py` - old lcd driver (replaced by touchscreen but still works)
 - `prepare_water_dataset.py` - turns strip photos into yolo dataset
