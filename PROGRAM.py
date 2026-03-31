@@ -42,7 +42,8 @@ ENABLE_EDGE_REFINEMENT = True
 SHOW_WINDOW = False
 
 CARTRIDGE_SWITCH_PIN = 17
-STATUS_LED_PIN = 27
+# bcm 19 = status led / buzzer per wiring (dont use 27 here - thats main pump relay)
+STATUS_LED_PIN = 19
 USER_NAME = "User"
 
 # pad positions (normalized)

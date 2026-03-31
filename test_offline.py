@@ -24,6 +24,16 @@ picam2_devices.IMX500 = type("IMX500", (), {})
 picam2_mod = sys.modules["picamera2"]
 picam2_mod.Picamera2 = type("Picamera2", (), {})
 
+class _FakeDI:
+    def __init__(self, *a, **k):
+        pass
+    def close(self):
+        pass
+    @property
+    def value(self):
+        return 1
+
+
 gpiozero_mod = sys.modules["gpiozero"]
 gpiozero_mod.Button = type("Button", (), {})
 gpiozero_mod.LED = type("LED", (), {})
@@ -32,6 +42,7 @@ gpiozero_mod.OutputDevice = type("OutputDevice", (), {
     "on": lambda self: None, "off": lambda self: None,
     "close": lambda self: None,
 })
+gpiozero_mod.DigitalInputDevice = _FakeDI
 
 for mod_name in ["RPLCD", "RPLCD.i2c"]:
     sys.modules[mod_name] = types.ModuleType(mod_name)
@@ -229,8 +240,8 @@ def run_tests():
     pc = PumpController()
     st = pc.get_status()
     chk("initial state all off", not st["main_pump"] and not st["dispense_pump"])
-    chk("routing starts at test", st["routing_valve"] == "test")
     chk("dump starts closed", st["dump_valve"] == "closed")
+    chk("aux valve starts closed", st.get("aux_valve") == "closed")
     chk("test not completed initially", not st["test_completed"])
     chk("cannot dispense before test", not pc.can_dispense)
 
@@ -287,7 +298,7 @@ def run_touchscreen_demo():
     print("  Press DISPENSE after the test completes.")
     print("  Close the window when done.\n")
 
-    from touchscreen import WaterFilterApp
+    from display import WaterFilterApp
     app = WaterFilterApp()
     app.run()
 
